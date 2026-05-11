@@ -1,43 +1,38 @@
 package database
 
 import (
+	"database/sql"
 	"fmt"
 	"time"
 
-	"go-base-project/config"
-
-	"github.com/jmoiron/sqlx"
 	_ "github.com/go-sql-driver/mysql"
+	"github.com/sirupsen/logrus"
+
+	"go-base-project/config"
 )
 
-type DB = sqlx.DB
-
-func NewMySQLConnection(cfg config.DatabaseConfig) (*DB, error) {
-
-	// format DSN MySQL
-	dsn := fmt.Sprintf(
-		"%s:%s@tcp(%s:%s)/%s?parseTime=true",
-		cfg.User,
-		cfg.Password,
-		cfg.Host,
-		cfg.Port,
-		cfg.Name,
-	)
-
-	db, err := sqlx.Open("mysql", dsn)
+func NewMySQL(cfg *config.DatabaseConfig, log *logrus.Logger) (*sql.DB, error) {
+	db, err := sql.Open("mysql", cfg.DSN())
 	if err != nil {
-		return nil, fmt.Errorf("gagal membuka koneksi DB: %w", err)
+		return nil, fmt.Errorf("open db: %w", err)
 	}
 
-	// connection pool
-	db.SetMaxOpenConns(cfg.MaxOpenConns)
-	db.SetMaxIdleConns(cfg.MaxIdleConns)
-	db.SetConnMaxLifetime(time.Duration(cfg.ConnMaxLifetime) * time.Minute)
+	db.SetMaxOpenConns(cfg.MaxOpenConn)
+	db.SetMaxIdleConns(cfg.MaxIdleConn)
+	db.SetConnMaxLifetime(cfg.ConnMaxLifetime)
 
-	// test koneksi
-	if err := db.Ping(); err != nil {
-		return nil, fmt.Errorf("tidak bisa ping database: %w", err)
+	// Ping with retry
+	for i := 0; i < 5; i++ {
+		if err = db.Ping(); err == nil {
+			break
+		}
+		log.Warnf("DB not ready, retry %d/5: %v", i+1, err)
+		time.Sleep(2 * time.Second)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("db ping failed after retries: %w", err)
 	}
 
+	log.Info("Database connected successfully")
 	return db, nil
 }

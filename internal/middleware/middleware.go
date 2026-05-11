@@ -1,166 +1,91 @@
 package middleware
 
 import (
-	"fmt"
 	"net/http"
-	"runtime/debug"
 	"strings"
 	"time"
 
-	"go-base-project/internal/model"
-	"go-base-project/internal/utils"
-
 	"github.com/gin-gonic/gin"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/sirupsen/logrus"
+
+	"go-base-project/internal/model"
 )
 
-type AppLogger struct {
-	*zap.SugaredLogger
-}
+// ─── Logger ───────────────────────────────────────────────────────────────────
 
-func NewLogger(level string) *AppLogger {
-	var zapLevel zapcore.Level
-	switch level {
-	case "debug":
-		zapLevel = zapcore.DebugLevel
-	case "warn":
-		zapLevel = zapcore.WarnLevel
-	case "error":
-		zapLevel = zapcore.ErrorLevel
-	default:
-		zapLevel = zapcore.InfoLevel
-	}
-
-	config := zap.NewProductionConfig()
-	config.Level = zap.NewAtomicLevelAt(zapLevel)
-	config.EncoderConfig.TimeKey = "timestamp"
-	config.EncoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
-
-	logger, _ := config.Build()
-	return &AppLogger{logger.Sugar()}
-}
-
-func RequestLogger(logger *AppLogger) gin.HandlerFunc {
+func Logger(log *logrus.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		start := time.Now()
 		path := c.Request.URL.Path
-		method := c.Request.Method
 
 		c.Next()
 
-		duration := time.Since(start)
-		statusCode := c.Writer.Status()
-
-		logEntry := fmt.Sprintf("[%d] %s %s (%s)", statusCode, method, path, duration)
-		if statusCode >= 500 {
-			logger.Error(logEntry)
-		} else if statusCode >= 400 {
-			logger.Warn(logEntry)
-		} else {
-			logger.Info(logEntry)
-		}
+		log.WithFields(logrus.Fields{
+			"status":  c.Writer.Status(),
+			"method":  c.Request.Method,
+			"path":    path,
+			"latency": time.Since(start),
+			"ip":      c.ClientIP(),
+		}).Info("request")
 	}
 }
 
-func Recovery(logger *AppLogger) gin.HandlerFunc {
+// ─── Recovery ─────────────────────────────────────────────────────────────────
+
+func Recovery(log *logrus.Logger) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		defer func() {
 			if err := recover(); err != nil {
-				logger.Error(fmt.Sprintf("PANIC: %v\n%s", err, debug.Stack()))
-
-				c.AbortWithStatusJSON(http.StatusInternalServerError, model.ErrorResponse(
-					"Terjadi kesalahan internal server", nil,
-				))
+				log.Errorf("panic recovered: %v", err)
+				c.AbortWithStatusJSON(http.StatusInternalServerError,
+					model.Fail("internal server error"))
 			}
 		}()
 		c.Next()
 	}
 }
 
-// ── CORS ─────────────────────────────────────────────────────
-// CORS mengizinkan request dari domain lain (misalnya frontend di port berbeda)
-
-func CORS(allowedOrigins []string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		origin := c.Request.Header.Get("Origin")
-
-		// Cek apakah origin diizinkan
-		allowed := false
-		for _, o := range allowedOrigins {
-			if o == "*" || o == origin {
-				allowed = true
-				break
-			}
-		}
-
-		if allowed {
-			c.Header("Access-Control-Allow-Origin", origin)
-			c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-			c.Header("Access-Control-Allow-Headers", "Origin, Content-Type, Authorization")
-			c.Header("Access-Control-Allow-Credentials", "true")
-		}
-
-		// Preflight request (browser nanya dulu sebelum kirim request asli)
-		if c.Request.Method == http.MethodOptions {
-			c.AbortWithStatus(http.StatusNoContent)
-			return
-		}
-
-		c.Next()
-	}
-}
+// ─── JWT Auth ─────────────────────────────────────────────────────────────────
 
 func JWTAuth(secret string) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		authHeader := c.GetHeader("Authorization")
 		if authHeader == "" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, model.ErrorResponse(
-				"Token tidak ditemukan, silakan login", nil,
-			))
+			c.AbortWithStatusJSON(http.StatusUnauthorized, model.Fail("missing authorization header"))
 			return
 		}
 
 		parts := strings.SplitN(authHeader, " ", 2)
 		if len(parts) != 2 || parts[0] != "Bearer" {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, model.ErrorResponse(
-				"Format token tidak valid (harus: Bearer <token>)", nil,
-			))
+			c.AbortWithStatusJSON(http.StatusUnauthorized, model.Fail("invalid authorization format"))
 			return
 		}
 
-		tokenString := parts[1]
-
-		claims, err := utils.ValidateJWT(tokenString, secret)
-		if err != nil {
-			c.AbortWithStatusJSON(http.StatusUnauthorized, model.ErrorResponse(
-				"Token tidak valid atau sudah kedaluwarsa", nil,
-			))
+		token, err := jwt.Parse(parts[1], func(t *jwt.Token) (interface{}, error) {
+			if _, ok := t.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, jwt.ErrSignatureInvalid
+			}
+			return []byte(secret), nil
+		})
+		if err != nil || !token.Valid {
+			c.AbortWithStatusJSON(http.StatusUnauthorized, model.Fail("invalid or expired token"))
 			return
 		}
 
-		c.Set("user_id", claims.UserID)
-		c.Set("user_email", claims.Email)
-		c.Set("user_role", claims.Role)
-
+		claims, _ := token.Claims.(jwt.MapClaims)
+		c.Set("user_id", claims["sub"])
 		c.Next()
 	}
 }
 
-func RequireRole(roles ...string) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		userRole := c.GetString("user_role")
+// ─── GenerateToken (helper) ───────────────────────────────────────────────────
 
-		for _, role := range roles {
-			if userRole == role {
-				c.Next()
-				return
-			}
-		}
-
-		c.AbortWithStatusJSON(http.StatusForbidden, model.ErrorResponse(
-			"Akses ditolak, role tidak mencukupi", nil,
-		))
+func GenerateToken(userID, secret string, expiryHours int) (string, error) {
+	claims := jwt.MapClaims{
+		"sub": userID,
+		"exp": time.Now().Add(time.Duration(expiryHours) * time.Hour).Unix(),
+		"iat": time.Now().Unix(),
 	}
+	return jwt.NewWithClaims(jwt.SigningMethodHS256, claims).SignedString([]byte(secret))
 }
-

@@ -4,133 +4,116 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"time"
 
 	"github.com/joho/godotenv"
 )
 
-// Config adalah struct utama yang menampung semua konfigurasi
 type Config struct {
 	App      AppConfig
 	Database DatabaseConfig
 	JWT      JWTConfig
-	Redis    RedisConfig 
+	Log      LogConfig
 }
 
 type AppConfig struct {
-	Name           string
-	Version        string
-	Env            string 
-	Port           string
-	LogLevel       string 
-	AllowedOrigins []string
+	Name    string
+	Env     string
+	Port    string
+	Version string
 }
 
 type DatabaseConfig struct {
 	Host            string
 	Port            string
-	Name            string
 	User            string
 	Password        string
-	SSLMode         string
-	MaxOpenConns    int
-	MaxIdleConns    int
-	ConnMaxLifetime int 
+	Name            string
+	MaxOpenConn     int
+	MaxIdleConn     int
+	ConnMaxLifetime time.Duration
 }
 
 type JWTConfig struct {
-	Secret          string
-	ExpiryHours     int
-	RefreshSecret   string
-	RefreshExpHours int
+	Secret      string
+	ExpiryHours int
 }
 
-type RedisConfig struct {
-	Host     string
-	Port     string
-	Password string
-	DB       int
+type LogConfig struct {
+	Level  string
+	Format string
 }
 
 func Load() (*Config, error) {
-	_ = godotenv.Load(".env")
+	// Load .env file (ignore error if not found — use OS env directly)
+	_ = godotenv.Load()
 
 	cfg := &Config{
 		App: AppConfig{
-			Name:    getEnv("APP_NAME", "go-base-project"),
-			Version: getEnv("APP_VERSION", "1.0.0"),
+			Name:    getEnv("APP_NAME", "banking-app"),
 			Env:     getEnv("APP_ENV", "development"),
 			Port:    getEnv("APP_PORT", "8080"),
-			LogLevel: getEnv("LOG_LEVEL", "debug"),
-			AllowedOrigins: []string{
-				getEnv("ALLOWED_ORIGINS", "*"),
-			},
+			Version: getEnv("APP_VERSION", "1.0.0"),
 		},
-
 		Database: DatabaseConfig{
 			Host:            getEnv("DB_HOST", "localhost"),
 			Port:            getEnv("DB_PORT", "3306"),
-			Name:            getEnv("DB_NAME", "mydb"),
 			User:            getEnv("DB_USER", "root"),
 			Password:        getEnv("DB_PASSWORD", ""),
-			SSLMode:         getEnv("DB_SSLMODE", "disable"),
-			MaxOpenConns:    getEnvInt("DB_MAX_OPEN_CONNS", 25),
-			MaxIdleConns:    getEnvInt("DB_MAX_IDLE_CONNS", 5),
-			ConnMaxLifetime: getEnvInt("DB_CONN_MAX_LIFETIME", 5),
+			Name:            getEnv("DB_NAME", "banking_db"),
+			MaxOpenConn:     getEnvInt("DB_MAX_OPEN_CONN", 25),
+			MaxIdleConn:     getEnvInt("DB_MAX_IDLE_CONN", 5),
+			ConnMaxLifetime: getEnvDuration("DB_CONN_MAX_LIFETIME", 5*time.Minute),
 		},
-
 		JWT: JWTConfig{
-			Secret:          getEnv("JWT_SECRET", "GANTI_INI_DENGAN_SECRET_YANG_KUAT"),
-			ExpiryHours:     getEnvInt("JWT_EXPIRY_HOURS", 24),
-			RefreshSecret:   getEnv("JWT_REFRESH_SECRET", "GANTI_INI_JUGA"),
-			RefreshExpHours: getEnvInt("JWT_REFRESH_EXPIRY_HOURS", 168), // 7 hari
+			Secret:      getEnv("JWT_SECRET", "change-me"),
+			ExpiryHours: getEnvInt("JWT_EXPIRY_HOURS", 24),
 		},
-
-		Redis: RedisConfig{
-			Host:     getEnv("REDIS_HOST", "localhost"),
-			Port:     getEnv("REDIS_PORT", "6379"),
-			Password: getEnv("REDIS_PASSWORD", ""),
-			DB:       getEnvInt("REDIS_DB", 0),
+		Log: LogConfig{
+			Level:  getEnv("LOG_LEVEL", "debug"),
+			Format: getEnv("LOG_FORMAT", "text"),
 		},
 	}
 
-	if err := cfg.validate(); err != nil {
-		return nil, err
-	}
-
-	return cfg, nil
+	return cfg, cfg.validate()
 }
 
 func (c *Config) validate() error {
 	if c.Database.Password == "" && c.App.Env == "production" {
-		return fmt.Errorf("DB_PASSWORD wajib diisi di production")
+		return fmt.Errorf("DB_PASSWORD is required in production")
 	}
-	if c.JWT.Secret == "GANTI_INI_DENGAN_SECRET_YANG_KUAT" && c.App.Env == "production" {
-		return fmt.Errorf("JWT_SECRET wajib diganti di production")
+	if c.JWT.Secret == "change-me" && c.App.Env == "production" {
+		return fmt.Errorf("JWT_SECRET must be changed in production")
 	}
 	return nil
 }
 
-func (d *DatabaseConfig) DSN() string {
-	return fmt.Sprintf(
-		"host=%s port=%s dbname=%s user=%s password=%s sslmode=%s",
-		d.Host, d.Port, d.Name, d.User, d.Password, d.SSLMode,
-	)
+func (c *DatabaseConfig) DSN() string {
+	return fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?parseTime=true&loc=Local",
+		c.User, c.Password, c.Host, c.Port, c.Name)
 }
 
-// ── HELPER FUNCTIONS ─────────────────────────────────────────
-
-func getEnv(key, defaultValue string) string {
-	if value := os.Getenv(key); value != "" {
-		return value
+func getEnv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
 	}
-	return defaultValue
+	return fallback
 }
 
-func getEnvInt(key string, defaultValue int) int {
-	if value := os.Getenv(key); value != "" {
-		if intVal, err := strconv.Atoi(value); err == nil {
-			return intVal
+func getEnvInt(key string, fallback int) int {
+	if v := os.Getenv(key); v != "" {
+		if i, err := strconv.Atoi(v); err == nil {
+			return i
 		}
 	}
-	return defaultValue
+	return fallback
+}
+
+func getEnvDuration(key string, fallback time.Duration) time.Duration {
+	if v := os.Getenv(key); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return fallback
 }

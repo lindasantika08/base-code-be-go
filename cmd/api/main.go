@@ -1,16 +1,14 @@
 package main
 
-// ======================File utama inisiasi configuration====================
-
 import (
-	"context"
 	"fmt"
-	"log"
-	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
+
+	"github.com/gin-contrib/cors"
+	"github.com/gin-gonic/gin"
+	"github.com/sirupsen/logrus"
 
 	"go-base-project/config"
 	"go-base-project/internal/database"
@@ -18,105 +16,111 @@ import (
 	"go-base-project/internal/middleware"
 	"go-base-project/internal/repository"
 	"go-base-project/internal/service"
-
-	"github.com/gin-gonic/gin"
 )
 
 func main() {
+	// ── Logger ────────────────────────────────────────────────────────────────
+	log := logrus.New()
+	log.SetFormatter(&logrus.TextFormatter{FullTimestamp: true})
+	log.SetOutput(os.Stdout)
+
+	// ── Config ────────────────────────────────────────────────────────────────
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf(" Gagal load config: %v", err)
+		log.Fatalf("config error: %v", err)
 	}
 
-	logger := middleware.NewLogger(cfg.App.LogLevel)
-	logger.Info("Memulai aplikasi " + cfg.App.Name)
-
-	db, err := database.NewMySQLConnection(cfg.Database)
+	// Set log level from config
+	level, err := logrus.ParseLevel(cfg.Log.Level)
 	if err != nil {
-		logger.Fatal("Gagal konek ke database: " + err.Error())
+		level = logrus.InfoLevel
+	}
+	log.SetLevel(level)
+	if cfg.Log.Format == "json" {
+		log.SetFormatter(&logrus.JSONFormatter{})
+	}
+
+	log.Infof("Starting %s v%s [%s]", cfg.App.Name, cfg.App.Version, cfg.App.Env)
+
+	// ── Database ──────────────────────────────────────────────────────────────
+	db, err := database.NewMySQL(&cfg.Database, log)
+	if err != nil {
+		log.Fatalf("database error: %v", err)
 	}
 	defer db.Close()
-	logger.Info(" Database terhubung")
 
-	// database.RunMigrations(db, "./migrations")
+	// ── Repositories ──────────────────────────────────────────────────────────
+	custRepo := repository.NewCustomerRepository(db)
+	txRepo   := repository.NewTransactionRepository(db)
 
-	userRepo := repository.NewUserRepository(db)       
-	userService := service.NewUserService(userRepo)    
-	userHandler := handler.NewUserHandler(userService) 
+	// ── Services ──────────────────────────────────────────────────────────────
+	custSvc  := service.NewCustomerService(custRepo)
+	txSvc   := service.NewTransactionService(txRepo, custRepo)
+	pointSvc := service.NewPointService(custRepo, txRepo)
 
-	router := setupRouter(cfg, userHandler, logger)
+	// ── Handlers ──────────────────────────────────────────────────────────────
+	authH    := handler.NewAuthHandler(cfg.JWT.Secret, cfg.JWT.ExpiryHours, log)
+	custH    := handler.NewCustomerHandler(custSvc, log)
+	txH      := handler.NewTransactionHandler(txSvc, log)
+	pointH   := handler.NewPointHandler(pointSvc, log)
 
-	addr := fmt.Sprintf(":%s", cfg.App.Port)
-	srv := &http.Server{
-		Addr:         addr,
-		Handler:      router,
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
-
-	go func() {
-		logger.Info(fmt.Sprintf("Server berjalan di http://localhost%s", addr))
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			logger.Fatal(" Server error: " + err.Error())
-		}
-	}()
-
-	quit := make(chan os.Signal, 1)
-	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
-	<-quit
-
-	logger.Info("Menghentikan server...")
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-	defer cancel()
-
-	if err := srv.Shutdown(ctx); err != nil {
-		logger.Fatal("Server paksa berhenti: " + err.Error())
-	}
-	logger.Info("Server berhenti dengan bersih")
-}
-
-func setupRouter(cfg *config.Config, userHandler *handler.UserHandler, logger *middleware.AppLogger) *gin.Engine {
+	// ── Router ────────────────────────────────────────────────────────────────
 	if cfg.App.Env == "production" {
 		gin.SetMode(gin.ReleaseMode)
 	}
 
-	router := gin.New()
+	r := gin.New()
+	r.Use(middleware.Recovery(log))
+	r.Use(middleware.Logger(log))
+	r.Use(cors.New(cors.Config{
+		AllowOrigins:     []string{"http://localhost:5173", "http://localhost:3000"},
+		AllowMethods:     []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
+		AllowHeaders:     []string{"Origin", "Content-Type", "Authorization"},
+		AllowCredentials: true,
+	}))
 
-	router.Use(middleware.RequestLogger(logger))   // log setiap request masuk
-	router.Use(middleware.Recovery(logger))       
-	router.Use(middleware.CORS(cfg.App.AllowedOrigins)) 
-
-	router.GET("/health", func(c *gin.Context) {
-		c.JSON(http.StatusOK, gin.H{
-			"status":  "ok",
-			"version": cfg.App.Version,
-		})
+	// Health check (public)
+	r.GET("/health", func(c *gin.Context) {
+		c.JSON(200, gin.H{"status": "ok", "version": cfg.App.Version})
 	})
 
-	// ── API V1 ───────────────────────────────────────────────
-	v1 := router.Group("/api/v1")
+	// API v1
+	v1 := r.Group("/api/v1")
+
+	// Public routes
+	v1.POST("/auth/login", authH.Login)
+
+	// Protected routes
+	auth := v1.Group("/")
+	auth.Use(middleware.JWTAuth(cfg.JWT.Secret))
 	{
-		auth := v1.Group("/auth")
-		{
-			auth.POST("/register", userHandler.Register)
-			auth.POST("/login", userHandler.Login)
-		}
+		// Customers
+		auth.POST("/customers",     custH.Create)
+		auth.GET("/customers",      custH.List)
 
-		protected := v1.Group("/")
-		protected.Use(middleware.JWTAuth(cfg.JWT.Secret)) 
-		{
-			users := protected.Group("/users")
-			{
-				users.GET("", userHandler.GetAll)       
-				users.GET("/:id", userHandler.GetByID)  
-				users.PUT("/:id", userHandler.Update)   
-				users.DELETE("/:id", userHandler.Delete)
-			}
+		// Transactions
+		auth.POST("/transactions",              txH.Create)
+		auth.GET("/transactions",               txH.List)
+		auth.GET("/transactions/passbook",      txH.Passbook)
 
-			// ── TAMBAHKAN ROUTE BARU DI SINI ────────────────
-		}
+		// Points
+		auth.GET("/points", pointH.List)
 	}
 
-	return router
+	// ── Start server ──────────────────────────────────────────────────────────
+	addr := fmt.Sprintf(":%s", cfg.App.Port)
+	log.Infof("Server listening on %s", addr)
+
+	// Graceful shutdown
+	quit := make(chan os.Signal, 1)
+	signal.Notify(quit, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		if err := r.Run(addr); err != nil {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	<-quit
+	log.Info("Shutting down server...")
 }
