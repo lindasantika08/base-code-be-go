@@ -131,14 +131,14 @@ HTTP Request
     ↓
 [Database]     ← SQL
 ```
-
+```
 **Aturan dependency:**
 - Handler boleh panggil Service
 - Service boleh panggil Repository
 - Repository langsung akses Database
 - Tidak boleh terbalik! (Repository tidak boleh panggil Service)
+```
 
----
 
 ## API Endpoints
 
@@ -153,7 +153,7 @@ HTTP Request
 | DELETE | `/api/v1/users/:id`         |    | Hapus user           |
 
 ---
-
+```
 ## Cara Menambah Fitur Baru
 
 Misalnya mau tambah fitur **Products**:
@@ -166,6 +166,7 @@ Misalnya mau tambah fitur **Products**:
 6. **Daftarkan route** di `cmd/api/main.go` (fungsi `setupRouter`)
 
 ---
+```
 
 ## Tech Stack
 
@@ -177,6 +178,8 @@ Misalnya mau tambah fitur **Products**:
 | Password    | bcrypt               | Hash password yang aman       |
 | Config      | godotenv             | Baca file .env                |
 | Logging     | Zap (uber-go)        | Structured logging            |
+
+```
 
 ---
 
