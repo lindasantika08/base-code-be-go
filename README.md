@@ -4,7 +4,7 @@
 > Tinggal clone, sesuaikan, dan langsung coding!
 
 ## Struktur Folder
-
+```
 go-base-project/
 ├── cmd/
 │   └── api/
