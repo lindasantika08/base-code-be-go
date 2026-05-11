@@ -1,0 +1,33 @@
+# ── ENVIRONMENT & SECRETS ───────────────────────────────────
+.env
+.env.local
+.env.production
+
+# ── BUILD OUTPUT ─────────────────────────────────────────────
+/bin/
+/dist/
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+
+# ── TEST ─────────────────────────────────────────────────────
+*.test
+*.out
+coverage.html
+coverage.out
+
+# ── IDE ──────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+
+# ── VENDOR (jika tidak pakai vendor mode) ────────────────────
+# vendor/
+
+# ── LOG FILES ────────────────────────────────────────────────
+*.log
+logs/
